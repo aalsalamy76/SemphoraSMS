@@ -1,13 +1,6 @@
 # Sémaphore — compilation automatique de l'APK Android
-#
-# Déclencheurs :
-#   - chaque push et chaque pull request  → APK de test (debug), téléchargeable dans l'onglet Actions
-#   - bouton « Run workflow » (manuel)     → idem
-#   - tag « v* » (ex. v1.0.0)              → en plus, une Release GitHub avec les APK attachés
-#
-# APK signé (release) : facultatif. Il est produit seulement si ces 4 secrets existent
-# (Settings › Secrets and variables › Actions) :
-#   KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+# Fonctionne avec le projet décompressé OU avec seulement « Semaphore-SMS.zip » dans le dépôt.
+# APK signé (facultatif) : secrets KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
 
 name: Android
 
@@ -28,31 +21,50 @@ concurrency:
 jobs:
   build:
     name: Compiler l'APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
 
     steps:
       - name: Récupérer le code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Trouver (ou décompresser) le projet
+        run: |
+          if [ -f gradlew ]; then
+            DIR="."
+          else
+            ZIP=$(ls *.zip 2>/dev/null | head -n 1)
+            if [ -n "$ZIP" ]; then
+              echo "Décompression de $ZIP"
+              unzip -q -o "$ZIP" -d _projet
+            fi
+            DIR=$(find . -path ./.git -prune -o -name gradlew -type f -print | head -n 1 | xargs -r dirname)
+          fi
+          if [ -z "$DIR" ] || [ ! -f "$DIR/gradlew" ]; then
+            echo "::error::Projet introuvable : ni gradlew ni zip du projet dans le dépôt."
+            ls -la
+            exit 1
+          fi
+          echo "Projet trouvé dans : $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          chmod +x "$DIR/gradlew"
 
       - name: Installer Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Configurer Gradle (avec cache)
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Accepter les licences du SDK Android
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Rendre gradlew exécutable
-        run: chmod +x gradlew
-
       - name: Compiler l'APK de test (debug)
+        working-directory: ${{ env.PROJECT_DIR }}
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Préparer la clé de signature
@@ -63,6 +75,7 @@ jobs:
 
       - name: Compiler l'APK signé (release)
         if: env.HAS_KEYSTORE == 'true'
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
           SIGNING_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -73,14 +86,15 @@ jobs:
         run: |
           mkdir -p dist
           VERSION="${GITHUB_REF_NAME//\//-}"
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/Semaphore-${VERSION}-debug.apk"
-          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk "dist/Semaphore-${VERSION}.apk"
+          OUT="$PROJECT_DIR/app/build/outputs/apk"
+          cp "$OUT/debug/app-debug.apk" "dist/Semaphore-${VERSION}-debug.apk"
+          if [ -f "$OUT/release/app-release.apk" ]; then
+            cp "$OUT/release/app-release.apk" "dist/Semaphore-${VERSION}.apk"
           fi
           ls -la dist
 
       - name: Publier les APK (artefact)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Semaphore-apk
           path: dist/*.apk
@@ -89,7 +103,7 @@ jobs:
 
       - name: Créer la Release GitHub
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.apk
           generate_release_notes: true
